@@ -6,7 +6,7 @@ import {
   CheckCircle2, Loader2, Download, FileSpreadsheet, Pencil, Info, Check,
 } from "lucide-react";
 import {
-  isBackendConnected, processarCartoes, resolveUrl,
+  isBackendConnected, processarCartoes, resolveUrl, corrigirRegistro,
   type Registro, type ResultadoProcessamento,
 } from "@/lib/api";
 
@@ -24,7 +24,7 @@ export const Route = createFileRoute("/")({
   component: Index,
 });
 
-const IMG_EXT = ["jpg", "jpeg", "png", "webp"];
+const IMG_EXT = ["jpg", "jpeg", "jfif", "png", "webp", "pdf"];
 const ext = (n: string) => n.split(".").pop()?.toLowerCase() ?? "";
 const isImg = (n: string) => IMG_EXT.includes(ext(n));
 const fmtSize = (b: number) => b < 1024 ? `${b} B` : b < 1048576 ? `${(b / 1024).toFixed(1)} KB` : `${(b / 1048576).toFixed(1)} MB`;
@@ -32,6 +32,7 @@ const fmtSize = (b: number) => b < 1024 ? `${b} B` : b < 1048576 ? `${(b / 1024)
 type Item = {
   key: string; file: File; path: string; kind: "imagem" | "zip";
   folder?: string | undefined; preview?: string; zipCount?: number | null;
+  collapsed?: boolean;
 };
 
 const ETAPAS = ["Arquivos enviados", "Leitura dos cartões", "Validação dos horários", "Planilha pronta"];
@@ -46,6 +47,7 @@ function Index() {
   const [erro, setErro] = useState<string | null>(null);
   const [res, setRes] = useState<ResultadoProcessamento | null>(null);
   const [registros, setRegistros] = useState<Registro[]>([]);
+  const [modalFolder, setModalFolder] = useState<{ key: string; nome: string; kind: string; count: number; itens: Item[] } | null>(null);
   const fotosRef = useRef<HTMLInputElement>(null);
   const pastaRef = useRef<HTMLInputElement>(null);
   const zipRef = useRef<HTMLInputElement>(null);
@@ -63,7 +65,7 @@ function Index() {
       if (existing.has(key)) { warn.push(`"${file.name}" já foi adicionado.`); continue; }
       existing.add(key);
       const folder = path.includes("/") ? path.split("/").slice(0, -1).join("/") : undefined;
-      if (isImg(file.name)) novos.push({ key, file, path, kind: "imagem", folder, preview: URL.createObjectURL(file) });
+      if (isImg(file.name)) novos.push({ key, file, path, kind: "imagem", folder, preview: URL.createObjectURL(file), collapsed: folder ? true : undefined });
       else if (ext(file.name) === "zip") {
         let zipCount: number | null = null;
         try {
@@ -71,8 +73,8 @@ function Index() {
           zipCount = Object.values(z.files).filter((f) => !f.dir && isImg(f.name) && !f.name.startsWith("__MACOSX")).length;
           if (zipCount === 0) warn.push(`O ZIP "${file.name}" não contém imagens suportadas.`);
         } catch { warn.push(`Não foi possível ler o conteúdo de "${file.name}".`); }
-        novos.push({ key, file, path, kind: "zip", zipCount });
-      } else if (!file.name.startsWith(".")) warn.push(`Formato não suportado: "${file.name}". Use JPG, JPEG, PNG, WEBP ou ZIP.`);
+        novos.push({ key, file, path, kind: "zip", zipCount, collapsed: true });
+      } else if (!file.name.startsWith(".")) warn.push(`Formato não suportado: "${file.name}". Use JPG, JPEG, JFIF, PNG, WEBP, PDF ou ZIP.`);
     }
     if (list.length && !novos.length && !warn.length) warn.push("Nenhuma imagem encontrada na seleção.");
     setItems((p) => [...p, ...novos]);
@@ -128,7 +130,6 @@ function Index() {
   }
 
   const precisaRevisao = registros.filter(needsReview).length;
-  const groups = groupItems(items);
 
   return (
     <div className="min-h-screen">
@@ -157,13 +158,13 @@ function Index() {
           >
             <UploadCloud className="mx-auto h-10 w-10 text-primary" />
             <p className="mt-3 font-medium">Arraste fotos, pastas ou arquivos ZIP aqui</p>
-            <p className="text-sm text-muted-foreground">JPG, JPEG, PNG, WEBP ou ZIP com várias fotos</p>
+            <p className="text-sm text-muted-foreground">JPG, JPEG, JFIF, PNG, WEBP, PDF ou ZIP com várias fotos</p>
             <div className="mt-5 flex flex-wrap justify-center gap-3">
               <PickBtn icon={<ImageIcon className="h-4 w-4" />} onClick={() => fotosRef.current?.click()}>Selecionar fotos</PickBtn>
               <PickBtn icon={<FolderOpen className="h-4 w-4" />} onClick={() => pastaRef.current?.click()}>Selecionar pasta</PickBtn>
               <PickBtn icon={<FileArchive className="h-4 w-4" />} onClick={() => zipRef.current?.click()}>Selecionar arquivo ZIP</PickBtn>
             </div>
-            <input ref={fotosRef} type="file" multiple hidden accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"
+            <input ref={fotosRef} type="file" multiple hidden accept=".jpg,.jpeg,.jfif,.png,.webp,.pdf,image/jpeg,image/jfif,image/png,image/webp,application/pdf"
               onChange={(e) => { fromInput(e.target.files); e.target.value = ""; }} />
             <input ref={pastaRef} type="file" multiple hidden
               {...({ webkitdirectory: "", directory: "" } as Record<string, string>)}
@@ -178,42 +179,95 @@ function Index() {
             </div>
           )}
 
-          {items.length > 0 && (
-            <div className="mt-5">
-              <div className="mb-3 flex items-center justify-between">
-                <p className="text-sm font-medium">{items.length} arquivo(s) selecionado(s)</p>
-                <button onClick={clear} className="flex items-center gap-1 text-sm text-primary hover:underline">
-                  <Trash2 className="h-4 w-4" /> Limpar seleção
-                </button>
-              </div>
-              <div className="space-y-4">
-                {groups.map(([folder, list]) => (
-                  <div key={folder || "_"}>
-                    {folder && <p className="mb-2 flex items-center gap-2 text-sm font-semibold text-primary"><FolderOpen className="h-4 w-4" />{folder} <span className="font-normal text-muted-foreground">({list.length} imagem(ns))</span></p>}
-                    <ul className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                      {list.map((i) => (
-                        <li key={i.key} className="flex items-center gap-3 rounded-lg border border-border bg-card p-2">
-                          {i.preview
-                            ? <img src={i.preview} alt={i.file.name} className="h-12 w-12 rounded object-cover" />
+          {(() => {
+            const pastasMap = new Map<string, { key: string; nome: string; count: number; itens: Item[] }>();
+            const zipsMap = new Map<string, { key: string; nome: string; count: number; itens: Item[] }>();
+            const fotosSoltas: Item[] = [];
+
+            for (const i of items) {
+              if (i.kind === "zip") {
+                const existing = zipsMap.get(i.file.name);
+                if (existing) {
+                  existing.count = i.zipCount ?? 0;
+                } else {
+                  zipsMap.set(i.file.name, {
+                    key: i.key,
+                    nome: i.file.name,
+                    count: i.zipCount ?? 0,
+                    itens: [],
+                  });
+                }
+              } else if (i.folder !== undefined) {
+                const folderKey = i.folder;
+                const existing = pastasMap.get(folderKey);
+                if (existing) {
+                  existing.itens.push(i);
+                  existing.count = existing.itens.length;
+                } else {
+                  pastasMap.set(folderKey, {
+                    key: i.key,
+                    nome: folderKey.split("/").pop() || "Pasta",
+                    count: 1,
+                    itens: [i],
+                  });
+                }
+              } else {
+                fotosSoltas.push(i);
+              }
+            }
+
+            const pastas = Array.from(pastasMap.values());
+            const zips = Array.from(zipsMap.values());
+            const grupos = [
+              ...pastas.map((p) => ({ ...p, kind: "Pasta" as const, isGroup: true })),
+              ...zips.map((z) => ({ ...z, kind: "ZIP" as const, isGroup: true })),
+              ...fotosSoltas.map((i) => ({
+                key: i.key,
+                nome: i.file.name,
+                kind: ext(i.file.name).toUpperCase(),
+                count: 1,
+                itens: [i],
+                isGroup: false,
+              })),
+            ];
+
+            return (
+              <div className="mt-5">
+                <div className="mb-3 flex items-center justify-between">
+                  <p className="text-sm font-medium">{items.length} arquivo(s) selecionado(s)</p>
+                  <button onClick={clear} className="flex items-center gap-1 text-sm text-primary hover:underline">
+                    <Trash2 className="h-4 w-4" /> Limpar seleção
+                  </button>
+                </div>
+                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                  {grupos.map((g) => (
+                    <div key={g.key} className="flex items-center gap-3 rounded-lg border border-border bg-card p-3">
+                      <button
+                        onClick={() => g.isGroup && setModalFolder(g)}
+                        className="flex h-12 w-12 shrink-0 items-center justify-center rounded bg-secondary hover:bg-muted"
+                        aria-label={g.isGroup ? `Ver ${g.count} fotos` : undefined}
+                      >
+                        {g.isGroup
+                          ? <FolderOpen className="h-6 w-6 text-primary" />
+                          : g.itens[0]?.preview
+                            ? <img src={g.itens[0].preview} alt={g.nome} className="h-12 w-12 rounded object-cover" />
                             : <div className="flex h-12 w-12 items-center justify-center rounded bg-secondary"><FileArchive className="h-5 w-5 text-primary" /></div>}
-                          <div className="min-w-0 flex-1">
-                            <p className="truncate text-sm font-medium">{i.file.name}</p>
-                            <p className="text-xs text-muted-foreground">
-                              {i.kind === "zip" ? "ZIP" : ext(i.file.name).toUpperCase()} · {fmtSize(i.file.size)}
-                              {i.kind === "zip" && (i.zipCount == null ? " · conteúdo não verificado" : ` · ${i.zipCount} imagem(ns)`)}
-                            </p>
-                          </div>
-                          <button onClick={() => remove(i.key)} aria-label={`Remover ${i.file.name}`} className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-primary">
-                            <X className="h-4 w-4" />
-                          </button>
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                ))}
+                      </button>
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-sm font-medium">{g.nome}</p>
+                        <p className="text-xs text-muted-foreground">
+                          {g.isGroup ? `${g.kind} · ${g.count} fotos` : `${g.kind} · ${fmtSize(g.itens[0]?.file.size ?? 0)}`}
+                        </p>
+                      </div>
+                      <button onClick={() => remove(g.key)} aria-label={`Remover ${g.nome}`} className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-primary">
+                        <X className="h-4 w-4" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
               </div>
-            </div>
-          )}
+            );
+          })()}
         </Section>
 
         {/* Processamento */}
@@ -281,6 +335,36 @@ function Index() {
           )}
         </section>
       </main>
+
+      {modalFolder && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={() => setModalFolder(null)}>
+          <div className="max-h-[80vh] w-full max-w-3xl overflow-y-auto rounded-xl border border-border bg-card p-6 shadow-xl" onClick={(e) => e.stopPropagation()}>
+            <div className="mb-4 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <FolderOpen className="h-5 w-5 text-primary" />
+                <h3 className="font-display text-lg font-bold">{modalFolder.nome}</h3>
+                <span className="text-sm text-muted-foreground">({modalFolder.count} fotos)</span>
+              </div>
+              <button onClick={() => setModalFolder(null)} className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-primary">
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4">
+              {modalFolder.itens.map((sub) => (
+                <div key={sub.key} className="flex items-center gap-2 rounded-lg border border-border bg-muted p-2">
+                  {sub.preview
+                    ? <img src={sub.preview} alt={sub.file.name} className="h-10 w-10 rounded object-cover" />
+                    : <div className="flex h-10 w-10 items-center justify-center rounded bg-secondary"><FileArchive className="h-4 w-4 text-primary" /></div>}
+                  <div className="min-w-0">
+                    <p className="truncate text-xs font-medium">{sub.file.name}</p>
+                    <p className="text-xs text-muted-foreground">{ext(sub.file.name).toUpperCase()} · {fmtSize(sub.file.size)}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -288,12 +372,6 @@ function Index() {
 function needsReview(r: Registro) {
   return r.revisar || r.confianca == null || r.confianca < 0.7 ||
     [r.entrada, r.saida_almoco, r.volta_almoco, r.saida].some((h) => !h);
-}
-
-function groupItems(items: Item[]): [string, Item[]][] {
-  const m = new Map<string, Item[]>();
-  items.forEach((i) => { const k = i.folder ?? ""; m.set(k, [...(m.get(k) ?? []), i]); });
-  return Array.from(m.entries()).sort(([a], [b]) => (a === "" ? -1 : b === "" ? 1 : a.localeCompare(b)));
 }
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
@@ -329,10 +407,30 @@ const CAMPOS: { k: keyof Registro; l: string }[] = [
 
 function ReviewTable({ registros, onChange }: { registros: Registro[]; onChange: (r: Registro[]) => void }) {
   const [editing, setEditing] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
   if (!registros.length)
     return <div className="rounded-lg bg-muted p-6 text-center text-sm text-muted-foreground">Os horários reconhecidos aparecerão aqui após o processamento real dos cartões.</div>;
   const set = (id: string, k: keyof Registro, v: string) =>
     onChange(registros.map((r) => (r.id === id ? { ...r, [k]: v || null } : r)));
+  const concluir = async (id: string) => {
+    setSaving(true);
+    try {
+      const reg = registros.find((r) => r.id === id);
+      if (reg) {
+        for (const c of CAMPOS) {
+          const valor = reg[c.k] as string | null;
+          if (valor) {
+            await corrigirRegistro(id, c.k, valor);
+          }
+        }
+      }
+      setEditing(null);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setSaving(false);
+    }
+  };
   return (
     <div className="overflow-x-auto">
       <table className="w-full min-w-[900px] text-sm">
@@ -355,7 +453,7 @@ function ReviewTable({ registros, onChange }: { registros: Registro[]; onChange:
                 ))}
                 <td className="p-2">{r.confianca == null ? "—" : `${Math.round(r.confianca * 100)}%`}{rev && <span className="ml-1 text-xs text-warning-foreground">· revisão manual</span>}</td>
                 <td className="p-2">
-                  <button onClick={() => setEditing(ed ? null : r.id)} className="inline-flex items-center gap-1 rounded border border-primary px-2 py-1 text-xs text-primary hover:bg-accent">
+                  <button onClick={() => ed ? concluir(r.id) : setEditing(r.id)} disabled={saving} className="inline-flex items-center gap-1 rounded border border-primary px-2 py-1 text-xs text-primary hover:bg-accent disabled:opacity-50">
                     {ed ? <><Check className="h-3 w-3" />Concluir</> : <><Pencil className="h-3 w-3" />Corrigir</>}
                   </button>
                 </td>
