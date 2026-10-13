@@ -1,5 +1,5 @@
 // Integração com a API Python + FastAPI. Configure VITE_API_URL no ambiente.
-export const API_URL: string | undefined = (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, "") || undefined;
+export const API_URL: string | undefined = (import.meta.env["VITE_API_URL"] as string | undefined)?.replace(/\/$/, "") || undefined;
 export const isBackendConnected = () => Boolean(API_URL);
 
 export type Registro = {

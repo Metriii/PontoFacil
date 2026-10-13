@@ -31,7 +31,7 @@ const fmtSize = (b: number) => b < 1024 ? `${b} B` : b < 1048576 ? `${(b / 1024)
 
 type Item = {
   key: string; file: File; path: string; kind: "imagem" | "zip";
-  folder?: string; preview?: string; zipCount?: number | null;
+  folder?: string | undefined; preview?: string; zipCount?: number | null;
 };
 
 const ETAPAS = ["Arquivos enviados", "Leitura dos cartões", "Validação dos horários", "Planilha pronta"];
