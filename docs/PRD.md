@@ -3,9 +3,9 @@
 ## 1. Informações do documento
 
 - **Nome do produto:** PontoFácil — Leitura e conferência de folhas de ponto.
-- **Versão:** 0.1.0 (proposta inicial de planejamento).
-- **Data da última atualização:** 2026-10-15.
-- **Estado do documento:** Rascunho para validação. Nenhuma implementação de backend foi realizada.
+- **Versão:** 0.1.2.
+- **Data da última atualização:** 2026-10-16.
+- **Estado do documento:** Em evolução. Etapas 1–8 do plano (§17) implementadas no backend (docs, esqueleto FastAPI, segurança de upload, persistência JSON, OCR, parser, regras de negócio e API de lote assíncrono). Frontend preservado.
 - **Responsável pela validação:** Usuário/proprietário do projeto (a definir formalmente).
 
 > **Nota de decisão.** A persistência é feita em **arquivos JSON** no disco, **sem banco de dados**: o sistema analisa as imagens, transforma o resultado em JSON e gera o Excel. O `CONTEXT.md` foi atualizado para refletir esta decisão (antes especificava SQLite). A coluna **"Hora Extra"** de alguns modelos de folha está **fora do escopo** desta versão.
@@ -206,6 +206,18 @@ Para cada requisito: objetivo, comportamento, entrada/saída, validações, erro
 
 > **Regras pendentes (dependem de decisão do usuário):** tolerâncias, arredondamentos, regra de intervalo padrão, tratamento de feriados/férias (ex.: anotação "Féria." na imagem de referência), critério de desempate de horários ambíguos e política de intervalo entre turnos. Não presumir respostas.
 
+### 8.1 Regras implementadas na etapa 7
+
+As regras abaixo foram implementadas em `backend/app/business/` (funções puras, sem OCR) na etapa 7 do plano (§17). São **conservadoras**: nenhuma presume dados ausentes, tolerância ou regra trabalhista.
+
+- **Normalização:** apenas dígitos reais são normalizados para `HH:MM` (`8:00` → `08:00`; `08h30` → `08:30`; `08.15` → `08:15`). Letras do OCR (ex.: `O8:OO`) permanecem `None`; o valor bruto é preservado em `valor_bruto`.
+- **Ausência/ilegibilidade:** cada campo ausente gera uma dúvida "Horário ausente"; cada campo com texto bruto não normalizável gera "Horário ilegível". Nunca se cria `00:00` nem se interpreta o vazio como folga/falta/ausência.
+- **Status do registro:** `invalido` (horário presente em formato inválido), `pendente` (ausente/ilegível/incompleto/ordem não crescente) ou `confirmado` (os quatro horários presentes e coerentes).
+- **Cálculo (`calcular_horas`):** total confirmado somente quando `entrada < saida_almoco < volta_almoco < saida`, somando dois segmentos rastreáveis (antes e depois do intervalo). Jornada com apenas `entrada`+`saida` fica **pendente** (regra de intervalo não presumida). Ordem não crescente (possível turno noturno) fica pendente, pois a virada de dia não está definida.
+- **Tipos de dia reconhecidos** (`fim_de_semana`, `feriado`, `ferias`) sem marcações não geram dúvida de ausência, mas também não confirmam folga nem inventam horários; apenas registram observação.
+- **Dúvidas:** produzidas como entidades `Duvida` (persistíveis em `duvidas.json`); dúvidas de cabeçalho (período/funcionário) usam `registro_id=""`.
+- **Fora do escopo:** a coluna "Hora Extra" não é considerada em nenhuma validação ou cálculo.
+
 ---
 
 ## 9. Modelo de dados
@@ -279,6 +291,8 @@ Base: `{VITE_API_URL}`. JSON UTF-8. CORS restrito a origens locais de desenvolvi
 | GET | `/api/lotes/{lote_id}/duvidas` | Pendências. |
 | POST | `/api/lotes/{lote_id}/exportar` | Gera exportações. |
 | GET | `/api/lotes/{lote_id}/downloads` | Lista arquivos disponíveis. |
+
+> **Implementado na etapa 8** (`backend/app/api/`): `POST /api/lotes`, `GET /api/lotes/{lote_id}`, `GET /api/lotes/{lote_id}/resultados`, `GET /api/lotes/{lote_id}/duvidas` e `PATCH /api/registros/{registro_id}`. O processamento roda em segundo plano (um worker por lote) e o progresso é persistido em `lote.json`. `POST /processar` (compatibilidade) e exportação/downloads ficam para as etapas 9–10. ZIP/pasta ainda não são aceitos pela API (o frontend expande pastas).
 
 **Códigos de erro:** 400 (validação), 404 (recurso inexistente/lote incorreto), 413 (excesso), 422 (payload inválido), 500 (erro interno sem vazar detalhes/caminhos).
 
@@ -386,16 +400,16 @@ Base: `{VITE_API_URL}`. JSON UTF-8. CORS restrito a origens locais de desenvolvi
 
 ## 17. Plano de implementação
 
-Etapas pequenas, ordenadas por dependência (nenhuma iniciada):
+Etapas pequenas, ordenadas por dependência. **Concluídas: 1–8.**
 
-1. **Documentação e contratos** (esta entrega) — PRD + ARQUITETURA.
-2. **Esqueleto do backend FastAPI** — app, config, CORS, healthcheck, `requirements.txt`.
-3. **Segurança de upload** — validação de assinatura/limites, nomes internos, camada `storage/`.
-4. **Persistência JSON** — repositórios de lote/registro/dúvida/correção, escrita atômica, recuperação.
-5. **Pipeline de imagem + OCR (Tesseract)** — pré-processamento e extração bruta.
-6. **Parser da folha** — funcionário, período e dias (coluna "Hora Extra" ignorada).
-7. **Regras de negócio** — normalização, validação, detecção de dúvidas, cálculo de horas (testáveis).
-8. **API de lote assíncrono + progresso** — worker em segundo plano e endpoints.
+1. ✅ **Documentação e contratos** — PRD + ARQUITETURA.
+2. ✅ **Esqueleto do backend FastAPI** — app, config, CORS, healthcheck, `requirements.txt`.
+3. ✅ **Segurança de upload** — validação de assinatura/limites, nomes internos, camada `storage/`.
+4. ✅ **Persistência JSON** — repositórios de lote/registro/dúvida/correção, escrita atômica, recuperação.
+5. ✅ **Pipeline de imagem + OCR (Tesseract)** — pré-processamento e extração bruta.
+6. ✅ **Parser da folha** — funcionário, período e dias (coluna "Hora Extra" ignorada).
+7. ✅ **Regras de negócio** — normalização, validação, detecção de dúvidas, cálculo de horas (testáveis), em `backend/app/business/` (ver §8.1).
+8. ✅ **API de lote assíncrono + progresso** — worker em segundo plano (`app/services/`) e endpoints (`app/api/`, ver §10).
 9. **Compatibilidade `/processar`** — adaptar ao contrato atual.
 10. **Exportação openpyxl** — por funcionário, consolidada, pendências.
 11. **Revisão/correção** — `PATCH` com validação e marcação de correção.

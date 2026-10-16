@@ -50,3 +50,12 @@ def salvar_imagem(
     temporario.write_bytes(conteudo)
     temporario.replace(destino)
     return destino
+
+
+def ler_imagem(
+    lote_id: str, nome_interno: str, *, base: Path | None = None
+) -> bytes:
+    """Lê uma imagem do lote pelo nome interno, com caminho validado."""
+    pasta = pasta_imagens_lote(lote_id, base=base)
+    destino = resolver_caminho_seguro(pasta, nome_interno)
+    return destino.read_bytes()

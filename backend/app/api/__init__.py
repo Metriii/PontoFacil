@@ -1,0 +1,12 @@
+"""Routers da API REST (etapa 8)."""
+
+from fastapi import APIRouter
+
+from .lotes import router as lotes_router
+from .registros import router as registros_router
+
+api_router = APIRouter()
+api_router.include_router(lotes_router)
+api_router.include_router(registros_router)
+
+__all__ = ["api_router"]

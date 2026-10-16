@@ -1,16 +1,21 @@
-"""Ponto de entrada da API PontoFácil (esqueleto — etapa 2).
+"""Ponto de entrada da API PontoFácil.
 
-Este módulo apenas sobe a aplicação FastAPI, configura o CORS restrito às
-origens locais e expõe um healthcheck. Os endpoints de lote, OCR, revisão e
-exportação serão adicionados nas etapas seguintes do PRD §17.
+Sobe a aplicação FastAPI, configura o CORS restrito às origens locais, expõe o
+healthcheck e os routers de lote (etapa 8). O processamento em segundo plano usa
+um ``ThreadPoolExecutor`` (um worker por lote), sem dependências extras.
 """
 
 from __future__ import annotations
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
+from .api import api_router
 from .config import settings
+from .persistence import RepositorioLotes
+from .security import ArquivoExcedeLimite, ErroUpload, LoteExcedeLimite
+from .services import ExecutorThreads, ServicoLotes
 
 app = FastAPI(
     title=settings.app_name,
@@ -25,6 +30,20 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
     allow_headers=["*"],
 )
+
+app.include_router(api_router)
+
+#: Instância única do serviço de lotes (repositório + executor em segundo plano).
+app.state.servico_lotes = ServicoLotes(RepositorioLotes(), ExecutorThreads())
+
+
+@app.exception_handler(ErroUpload)
+async def _erro_upload_handler(_: Request, exc: ErroUpload) -> JSONResponse:
+    """Converte erros de upload em respostas 4xx sem vazar detalhes internos."""
+    status = 413 if isinstance(exc, (ArquivoExcedeLimite, LoteExcedeLimite)) else 400
+    return JSONResponse(
+        status_code=status, content={"detail": exc.mensagem, "codigo": exc.codigo}
+    )
 
 
 @app.get("/", tags=["infra"])
