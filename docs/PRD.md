@@ -3,9 +3,9 @@
 ## 1. Informações do documento
 
 - **Nome do produto:** PontoFácil — Leitura e conferência de folhas de ponto.
-- **Versão:** 0.1.2.
+- **Versão:** 0.1.4.
 - **Data da última atualização:** 2026-10-16.
-- **Estado do documento:** Em evolução. Etapas 1–8 do plano (§17) implementadas no backend (docs, esqueleto FastAPI, segurança de upload, persistência JSON, OCR, parser, regras de negócio e API de lote assíncrono). Frontend preservado.
+- **Estado do documento:** Em evolução. Etapas 1–8 do plano (§17) implementadas no backend (docs, esqueleto FastAPI, segurança de upload, persistência JSON, OCR, parser, regras de negócio e API de lote assíncrono), integração do frontend e **etapa 10 (exportação openpyxl) + 11 (downloads)** implementadas. A geração do endpoint de compatibilidade `/processar` (§17 etapa 9) permanece pendente.
 - **Responsável pela validação:** Usuário/proprietário do projeto (a definir formalmente).
 
 > **Nota de decisão.** A persistência é feita em **arquivos JSON** no disco, **sem banco de dados**: o sistema analisa as imagens, transforma o resultado em JSON e gera o Excel. O `CONTEXT.md` foi atualizado para refletir esta decisão (antes especificava SQLite). A coluna **"Hora Extra"** de alguns modelos de folha está **fora do escopo** desta versão.
@@ -150,13 +150,15 @@ Para cada requisito: objetivo, comportamento, entrada/saída, validações, erro
 
 ### RF-012 — Geração de planilhas Excel
 - **Objetivo:** gerar `.xlsx` com openpyxl.
-- **Comportamento:** gerar por funcionário/período, uma consolidada e uma relação de pendências; horários formatados e totais calculados.
-- **Validações:** não exportar dúvidas como confirmadas; neutralizar textos que iniciem com `=`, `+`, `-`, `@` (injeção de fórmula).
-- **Aceitação:** planilhas abrem no Excel; totais conferem com os cálculos; dúvidas separadas.
+- **Comportamento:** gerar por funcionário/período e uma consolidada (Resumo + Consolidado); horários formatados e totais calculados.
+- **Validações:** exportar **apenas** registros confirmados ou corrigidos+validados; não exportar dúvidas como confirmadas; neutralizar textos que iniciem com `=`, `+`, `-`, `@`, `<TAB>` ou `<CR>` (injeção de fórmula); nunca inventar horários.
+- **Aceitação:** planilhas abrem no Excel; totais conferem com os cálculos; dúvidas e pendências não entram.
+- **Estado:** **implementado** (etapa 10). Organização por funcionário e dia; a coluna "Hora Extra" não é exportada.
 
 ### RF-013 — Resumo do lote
 - **Objetivo:** informar quantas imagens foram processadas, falharam e precisam de revisão.
 - **Aceitação:** números do resumo consistentes com os JSONs do lote.
+- **Estado:** o resumo do processamento já existe; a aba "Resumo" da planilha consolidada (etapa 10) agrega dias e total confirmado por funcionário.
 
 ### RF-014 — Consulta de dúvidas
 - **Objetivo:** listar pendências do lote.
@@ -165,9 +167,10 @@ Para cada requisito: objetivo, comportamento, entrada/saída, validações, erro
 
 ### RF-015 — Downloads
 - **Objetivo:** disponibilizar arquivos gerados.
-- **Comportamento:** `GET /api/lotes/{id}/downloads` lista arquivos; download só do lote correto.
-- **Validações:** bloquear travessia de diretório e caminhos arbitrários.
-- **Aceitação:** só arquivos do lote solicitado são baixáveis.
+- **Comportamento:** `GET /api/lotes/{id}/downloads` lista arquivos; `GET /api/lotes/{id}/downloads/{arquivo_id}` baixa o arquivo; download só do lote correto.
+- **Validações:** bloquear travessia de diretório e caminhos arbitrários; o `arquivo_id` precisa estar registrado no lote solicitado.
+- **Aceitação:** só arquivos do lote solicitado são baixáveis; arquivo de outro lote retorna 404.
+- **Estado:** **implementado** (etapa 11). A seção "Planilhas" do frontend lista e baixa os arquivos, com tratamento de erro de download.
 
 ### RF-016 — Compatibilidade com o contrato atual
 - **Objetivo:** preservar o frontend existente.
@@ -217,6 +220,15 @@ As regras abaixo foram implementadas em `backend/app/business/` (funções puras
 - **Tipos de dia reconhecidos** (`fim_de_semana`, `feriado`, `ferias`) sem marcações não geram dúvida de ausência, mas também não confirmam folga nem inventam horários; apenas registram observação.
 - **Dúvidas:** produzidas como entidades `Duvida` (persistíveis em `duvidas.json`); dúvidas de cabeçalho (período/funcionário) usam `registro_id=""`.
 - **Fora do escopo:** a coluna "Hora Extra" não é considerada em nenhuma validação ou cálculo.
+
+### 8.2 Regras de exportação implementadas (etapa 10)
+
+- **Exportabilidade (`business/exportavel.py`):** só entram registros `confirmado` ou `corrigido` **e** com jornada confirmada por `calcular_horas`. Registros pendentes/inválidos e corrigidos ainda incompletos ficam de fora.
+- **Dias sem marcação:** um dia `confirmado` com tipo reconhecido (`fim_de_semana`, `feriado`, `ferias`) é exportado com batidas e total **em branco** — nunca se inventam horários.
+- **Totais:** somados apenas dos registros confirmados (`calcular_horas`), formatados `HH:MM`; a aba "Resumo" agrega por funcionário e o Consolidado lista todos os dias.
+- **Neutralização de fórmulas:** textos iniciados por `=`, `+`, `-`, `@`, `<TAB>` ou `<CR>` recebem um apóstrofo de prefixo.
+- **Reexportação idempotente:** ao exportar novamente, os arquivos anteriores do lote são removidos e `arquivos_gerados` é substituído (política explícita de não sobrescrever sem regra definida).
+- **"Hora Extra":** fora do modelo e de todas as planilhas.
 
 ---
 
@@ -289,10 +301,15 @@ Base: `{VITE_API_URL}`. JSON UTF-8. CORS restrito a origens locais de desenvolvi
 | GET | `/api/lotes/{lote_id}/resultados` | Registros extraídos. |
 | PATCH | `/api/registros/{registro_id}` | Corrige um registro (validação). |
 | GET | `/api/lotes/{lote_id}/duvidas` | Pendências. |
-| POST | `/api/lotes/{lote_id}/exportar` | Gera exportações. |
-| GET | `/api/lotes/{lote_id}/downloads` | Lista arquivos disponíveis. |
+| POST | `/api/lotes/{lote_id}/exportar` | Gera exportações (só confirmados/corrigidos válidos). Resposta `ExportacaoLote`. |
+| GET | `/api/lotes/{lote_id}/downloads` | Lista arquivos disponíveis (com `url`). |
+| GET | `/api/lotes/{lote_id}/downloads/{arquivo_id}` | Baixa um arquivo `.xlsx` do lote. |
 
-> **Implementado na etapa 8** (`backend/app/api/`): `POST /api/lotes`, `GET /api/lotes/{lote_id}`, `GET /api/lotes/{lote_id}/resultados`, `GET /api/lotes/{lote_id}/duvidas` e `PATCH /api/registros/{registro_id}`. O processamento roda em segundo plano (um worker por lote) e o progresso é persistido em `lote.json`. `POST /processar` (compatibilidade) e exportação/downloads ficam para as etapas 9–10. ZIP/pasta ainda não são aceitos pela API (o frontend expande pastas).
+> **Implementado na etapa 8** (`backend/app/api/`): `POST /api/lotes`, `GET /api/lotes/{lote_id}`, `GET /api/lotes/{lote_id}/resultados`, `GET /api/lotes/{lote_id}/duvidas` e `PATCH /api/registros/{registro_id}`. O processamento roda em segundo plano (um worker por lote) e o progresso é persistido em `lote.json`. `POST /processar` (compatibilidade, etapa 9) permanece pendente. ZIP/pasta ainda não são aceitos pela API (o frontend expande pastas/ZIP).
+
+> **Implementado na etapa 10/11** (`backend/app/api/exportacao.py`): `POST /api/lotes/{lote_id}/exportar`, `GET /api/lotes/{lote_id}/downloads` e `GET /api/lotes/{lote_id}/downloads/{arquivo_id}`. A exportação usa `openpyxl` (`backend/app/exports/`) e inclui apenas registros confirmados ou corrigidos+validados (`backend/app/business/exportavel.py`). Arquivos ficam em `<storage>/exports/<lote_id>/` e o download é restrito ao lote. Ambas as rotas de download exigem que o `arquivo_id` esteja registrado no lote (proteção contra acesso cruzado).
+
+> **Integração do frontend implementada** (RF-016 preservado): `src/lib/api.ts` ganhou `criarLote`, `obterLote`, `obterResultados`, `obterDuvidas`, `corrigirRegistro`, `aguardarLote` e `paraRegistros`, sem remover `processarCartoes`, `resolveUrl` nem `isBackendConnected`. A tela `src/routes/index.tsx` agora envia o lote, acompanha o progresso por *polling*, exibe resultados e dúvidas e grava correções via `PATCH`, mantendo o layout. ZIPs são expandidos no cliente (JSZip) antes do envio. Exportação/downloads (etapas 10–11) ainda não geram planilhas.
 
 **Códigos de erro:** 400 (validação), 404 (recurso inexistente/lote incorreto), 413 (excesso), 422 (payload inválido), 500 (erro interno sem vazar detalhes/caminhos).
 
@@ -310,6 +327,17 @@ Base: `{VITE_API_URL}`. JSON UTF-8. CORS restrito a origens locais de desenvolvi
   "consolidado": { arquivo, funcionario, referencia, status, url } | null
 }
 ```
+
+`ExportacaoLote` (`POST /api/lotes/{id}/exportar`, etapa 10):
+```
+{
+  "lote_id": str,
+  "planilhas": [ { arquivo, funcionario, referencia, status, url } ],
+  "consolidado": { ... } | null,
+  "total_registros": int
+}
+```
+`total_registros = 0`, `planilhas = []` e `consolidado = null` quando o lote não tem registros exportáveis.
 
 ---
 
@@ -400,7 +428,7 @@ Base: `{VITE_API_URL}`. JSON UTF-8. CORS restrito a origens locais de desenvolvi
 
 ## 17. Plano de implementação
 
-Etapas pequenas, ordenadas por dependência. **Concluídas: 1–8.**
+Etapas pequenas, ordenadas por dependência. **Concluídas: 1–8, integração do frontend, 10 e 11.**
 
 1. ✅ **Documentação e contratos** — PRD + ARQUITETURA.
 2. ✅ **Esqueleto do backend FastAPI** — app, config, CORS, healthcheck, `requirements.txt`.
@@ -410,10 +438,10 @@ Etapas pequenas, ordenadas por dependência. **Concluídas: 1–8.**
 6. ✅ **Parser da folha** — funcionário, período e dias (coluna "Hora Extra" ignorada).
 7. ✅ **Regras de negócio** — normalização, validação, detecção de dúvidas, cálculo de horas (testáveis), em `backend/app/business/` (ver §8.1).
 8. ✅ **API de lote assíncrono + progresso** — worker em segundo plano (`app/services/`) e endpoints (`app/api/`, ver §10).
-9. **Compatibilidade `/processar`** — adaptar ao contrato atual.
-10. **Exportação openpyxl** — por funcionário, consolidada, pendências.
-11. **Revisão/correção** — `PATCH` com validação e marcação de correção.
-12. **Integração do frontend** — evoluir `src/lib/api.ts` e a UI de progresso sem quebrar o design.
-13. **Testes** — unitários, integração, segurança e imagens reais.
+9. **Compatibilidade `/processar`** — adaptar ao contrato atual (ainda pendente; a tela usa a API assíncrona).
+10. ✅ **Exportação openpyxl** — por funcionário e consolidada (`app/exports/` + `app/services/exportacao.py`), só registros confirmados/corrigidos válidos (§8.2).
+11. ✅ **Revisão/correção + downloads** — `PATCH /api/registros/{id}` (já existente) e `GET /api/lotes/{id}/downloads[/{arquivo_id}]`; seção "Planilhas" no frontend.
+12. ✅ **Integração do frontend** — `src/lib/api.ts` e `src/routes/index.tsx` ligados a `POST /api/lotes`, `GET /api/lotes/{id}`, `/resultados`, `/duvidas`, `PATCH /api/registros/{id}` e à exportação/download, sem alterar o layout.
+13. **Testes** — unitários, integração, segurança e imagens reais (parcial: backend + frontend cobrindo exportação; integração real com imagens pendente).
 
 **Definição de concluído:** atende ao PRD, preserva o frontend, possui validações/testes executados, não inventa dados, custo zero e memória por prompt registrada.

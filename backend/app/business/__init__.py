@@ -12,6 +12,11 @@ from .calculo import (
     calcular_ficha,
     calcular_horas,
 )
+from .exportavel import (
+    STATUS_EXPORTAVEIS,
+    registro_exportavel,
+    registros_exportaveis,
+)
 from .horarios import (
     HORARIO_RE,
     formatar_duracao,
@@ -29,6 +34,7 @@ from .validacao import (
 __all__ = [
     "CAMPOS_HORARIO",
     "HORARIO_RE",
+    "STATUS_EXPORTAVEIS",
     "CalculoHoras",
     "CalculoRegistro",
     "ResumoFicha",
@@ -40,6 +46,8 @@ __all__ = [
     "horario_valido",
     "minutos_do_dia",
     "normalizar_horario",
+    "registro_exportavel",
+    "registros_exportaveis",
     "validar_ficha",
     "validar_fichas",
     "validar_registro",

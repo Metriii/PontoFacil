@@ -47,6 +47,11 @@ class RepositorioLotes:
     def caminho_imagens(self, lote_id: str) -> Path:
         return self._caminho(lote_id, "imagens")
 
+    def pasta_exports(self, lote_id: str) -> Path:
+        """Diretório de exportação do lote, dentro de ``<base>/exports/``."""
+        exigir_id_lote(lote_id)
+        return resolver_caminho_seguro(self.base / "exports", lote_id)
+
     def criar(self) -> Lote:
         lote_id = gerar_id_lote()
         self._caminho(lote_id, "imagens").mkdir(parents=True, exist_ok=True)
@@ -111,6 +116,15 @@ class RepositorioLotes:
     ) -> Lote:
         lote = self.obter(lote_id)
         lote.arquivos_gerados.append(arquivo)
+        self.salvar(lote)
+        return lote
+
+    def definir_arquivos_gerados(
+        self, lote_id: str, arquivos: list[ArquivoGerado]
+    ) -> Lote:
+        """Substitui a lista de arquivos gerados do lote (política de reexportação)."""
+        lote = self.obter(lote_id)
+        lote.arquivos_gerados = list(arquivos)
         self.salvar(lote)
         return lote
 

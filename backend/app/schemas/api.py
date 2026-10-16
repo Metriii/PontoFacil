@@ -47,6 +47,23 @@ class ArquivoGeradoSchema(BaseModel):
     gerado_em: str
 
 
+class PlanilhaSchema(BaseModel):
+    """Arquivo exportado pronto para download (compatível com ``Planilha`` do frontend)."""
+
+    arquivo: str
+    funcionario: str | None = None
+    referencia: str | None = None
+    status: str
+    url: str
+
+
+class ExportacaoLote(BaseModel):
+    lote_id: str
+    planilhas: list[PlanilhaSchema] = Field(default_factory=list)
+    consolidado: PlanilhaSchema | None = None
+    total_registros: int = 0
+
+
 class LoteCriado(BaseModel):
     lote_id: str
     estado: str
@@ -212,4 +229,15 @@ def duvida_schema(duvida: Duvida) -> DuvidaSchema:
         campo=duvida.campo,
         motivo=duvida.motivo,
         origem=duvida.origem,
+    )
+
+
+def planilha_schema(arquivo: ArquivoGerado, lote_id: str) -> PlanilhaSchema:
+    """Converte um arquivo gerado em planilha baixável (URL relativa ao lote)."""
+    return PlanilhaSchema(
+        arquivo=arquivo.nome,
+        funcionario=arquivo.funcionario,
+        referencia=arquivo.referencia,
+        status="disponível",
+        url=f"/api/lotes/{lote_id}/downloads/{arquivo.arquivo_id}",
     )

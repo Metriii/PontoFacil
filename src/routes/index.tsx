@@ -6,8 +6,10 @@ import {
   CheckCircle2, Loader2, Download, FileSpreadsheet, Pencil, Info, Check,
 } from "lucide-react";
 import {
-  isBackendConnected, processarCartoes, resolveUrl,
-  type Registro, type ResultadoProcessamento,
+  isBackendConnected,
+  criarLote, aguardarLote, obterResultados, obterDuvidas, corrigirRegistro, paraRegistros,
+  exportarLote, baixarArquivo,
+  type Registro, type ResultadoProcessamento, type Duvida, type CampoHorario, type RegistroAPI, type Planilha,
 } from "@/lib/api";
 
 export const Route = createFileRoute("/")({
@@ -46,6 +48,10 @@ function Index() {
   const [erro, setErro] = useState<string | null>(null);
   const [res, setRes] = useState<ResultadoProcessamento | null>(null);
   const [registros, setRegistros] = useState<Registro[]>([]);
+  const [loteId, setLoteId] = useState<string | null>(null);
+  const [duvidas, setDuvidas] = useState<Duvida[]>([]);
+  const [erroDownload, setErroDownload] = useState<string | null>(null);
+  const [baixando, setBaixando] = useState<string | null>(null);
   const fotosRef = useRef<HTMLInputElement>(null);
   const pastaRef = useRef<HTMLInputElement>(null);
   const zipRef = useRef<HTMLInputElement>(null);
@@ -107,7 +113,8 @@ function Index() {
   }
 
   const remove = (key: string) => setItems((p) => {
-    p.find((i) => i.key === key)?.preview && URL.revokeObjectURL(p.find((i) => i.key === key)!.preview!);
+    const alvo = p.find((i) => i.key === key);
+    if (alvo?.preview) URL.revokeObjectURL(alvo.preview);
     return p.filter((i) => i.key !== key);
   });
   const clear = () => { items.forEach((i) => i.preview && URL.revokeObjectURL(i.preview)); setItems([]); setMsgs([]); };
@@ -115,16 +122,88 @@ function Index() {
   const validos = items.filter((i) => i.kind === "imagem" || (i.zipCount ?? 1) > 0);
   const totalCartoes = items.reduce((s, i) => s + (i.kind === "imagem" ? 1 : i.zipCount ?? 0), 0);
 
+  async function montarArquivos(list: Item[]): Promise<{ file: File; path: string }[]> {
+    const out: { file: File; path: string }[] = [];
+    for (const it of list) {
+      if (it.kind === "imagem") { out.push({ file: it.file, path: it.path }); continue; }
+      const z = await JSZip.loadAsync(it.file);
+      const base = it.path.replace(/\.zip$/i, "");
+      for (const [name, entry] of Object.entries(z.files)) {
+        if (entry.dir || name.startsWith("__MACOSX") || !isImg(name)) continue;
+        const blob = await entry.async("blob");
+        out.push({ file: new File([blob], name.split("/").pop() ?? name, { type: blob.type }), path: `${base}/${name}` });
+      }
+    }
+    return out;
+  }
+
   async function processar() {
     setErro(null); setLoading(true); setEtapa(0); setProgress(0);
+    setRes(null); setRegistros([]); setDuvidas([]); setLoteId(null);
+    setErroDownload(null);
     try {
-      const r = await processarCartoes(validos.map((i) => ({ file: i.file, path: i.path })), (p) => {
-        setProgress(p); if (p >= 100) setEtapa(1);
+      const arquivos = await montarArquivos(validos);
+      if (!arquivos.length) throw new Error("Nenhuma imagem válida para enviar.");
+      const criado = await criarLote(arquivos, (p) => { setProgress(p); if (p >= 100) setEtapa(1); });
+      setLoteId(criado.lote_id); setEtapa(1);
+      const lote = await aguardarLote(criado.lote_id, (s) => {
+        const total = s.progresso.total || 1;
+        setProgress(Math.min(100, Math.round(((s.progresso.processados + s.progresso.falhas) / total) * 100)));
       });
-      setEtapa(3); setRes(r); setRegistros(r.registros ?? []);
+      setEtapa(2);
+      const [resultados, listaDuvidas] = await Promise.all([obterResultados(criado.lote_id), obterDuvidas(criado.lote_id)]);
+      const regs = paraRegistros(resultados, listaDuvidas);
+      setRegistros(regs); setDuvidas(listaDuvidas);
+
+      let planilhas: Planilha[] = [];
+      let consolidado: Planilha | null = null;
+      try {
+        const exportacao = await exportarLote(criado.lote_id);
+        planilhas = exportacao.planilhas;
+        consolidado = exportacao.consolidado;
+      } catch (e) {
+        setErroDownload(e instanceof Error ? e.message : "Não foi possível gerar as planilhas.");
+      }
+
+      setRes({ total_cartoes: lote.progresso.total, processados: lote.progresso.processados, registros: regs, planilhas, consolidado });
+      setEtapa(3);
+      if (lote.estado === "falhou" && !regs.length) setErro("O lote falhou: nenhuma imagem pôde ser processada.");
+      else if (lote.progresso.falhas > 0) setErro(`${lote.progresso.falhas} imagem(ns) não puderam ser processadas.`);
     } catch (e) {
       setErro(e instanceof Error ? e.message : "Erro ao processar."); setEtapa(-1);
     } finally { setLoading(false); }
+  }
+
+  async function baixar(url: string, nome: string) {
+    setErroDownload(null);
+    setBaixando(url);
+    try {
+      const blob = await baixarArquivo(url);
+      const obj = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = obj; a.download = nome;
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(obj);
+    } catch (e) {
+      setErroDownload(e instanceof Error ? e.message : "Não foi possível baixar a planilha.");
+    } finally {
+      setBaixando(null);
+    }
+  }
+
+  async function corrigir(id: string, changes: Partial<Registro>) {
+    if (!loteId) return;
+    const atualizados: RegistroAPI[] = [];
+    for (const [campo, valor] of Object.entries(changes)) {
+      atualizados.push(await corrigirRegistro(id, campo as CampoHorario, (valor as string | null) ?? null));
+    }
+    const ultimo = atualizados.at(-1);
+    const novas = await obterDuvidas(loteId);
+    setDuvidas(novas);
+    if (ultimo) setRegistros((prev) => prev.map((r) => r.id === id
+      ? { ...r, entrada: ultimo.entrada, saida_almoco: ultimo.saida_almoco, volta_almoco: ultimo.volta_almoco, saida: ultimo.saida,
+          revisar: ultimo.status_validacao === "pendente" || ultimo.status_validacao === "invalido" || novas.some((d) => d.registro_id === id) }
+      : r));
   }
 
   const precisaRevisao = registros.filter(needsReview).length;
@@ -244,7 +323,7 @@ function Index() {
               );
             })}
           </ol>
-          {loading && etapa === 0 && (
+          {loading && (etapa === 0 || etapa === 1) && (
             <div className="mt-3 h-2 overflow-hidden rounded-full bg-muted"><div className="h-full bg-primary transition-all" style={{ width: `${progress}%` }} /></div>
           )}
           {erro && <p className="mt-3 flex items-center gap-2 text-sm text-destructive"><AlertCircle className="h-4 w-4" />{erro}</p>}
@@ -260,23 +339,42 @@ function Index() {
 
         {/* Revisão */}
         <Section title="3. Revisão dos horários">
-          <ReviewTable registros={registros} onChange={setRegistros} />
+          {duvidas.length > 0 && (
+            <div className="mb-4 space-y-1 rounded-lg bg-warning p-3 text-sm text-warning-foreground">
+              <p className="flex items-center gap-2 font-medium"><AlertCircle className="h-4 w-4 shrink-0" />{duvidas.length} dúvida(s) pendente(s) para revisão</p>
+              <ul className="list-disc space-y-0.5 pl-6">
+                {duvidas.map((d) => {
+                  const reg = registros.find((r) => r.id === d.registro_id);
+                  const ref = [reg?.funcionario, reg?.data].filter(Boolean).join(" · ");
+                  return <li key={d.duvida_id}>{d.campo}{ref ? ` (${ref})` : ""}: {d.motivo}</li>;
+                })}
+              </ul>
+            </div>
+          )}
+          <ReviewTable registros={registros} onCorrigir={corrigir} />
         </Section>
 
         {/* Planilhas */}
         <section className="rounded-xl border-2 border-primary bg-card p-6 shadow-sm">
           <h2 className="mb-4 flex items-center gap-2 font-display text-xl font-bold text-primary"><FileSpreadsheet className="h-5 w-5" />Planilhas geradas</h2>
+          {erroDownload && (
+            <p className="mb-3 flex items-center gap-2 text-sm text-destructive"><AlertCircle className="h-4 w-4" />{erroDownload}</p>
+          )}
           {!res || (!res.planilhas?.length && !res.consolidado) ? (
             <div className="rounded-lg bg-muted p-6 text-center text-sm text-muted-foreground">
-              <p className="font-medium text-foreground">Suas planilhas aparecerão aqui após o processamento.</p>
+              {res ? (
+                <p className="font-medium text-foreground">Nenhum registro confirmado ou corrigido para exportar.</p>
+              ) : (
+                <p className="font-medium text-foreground">Suas planilhas aparecerão aqui após o processamento.</p>
+              )}
               <p className="mt-1">O botão “Baixar Excel” só fica disponível quando houver uma planilha real gerada pelo sistema.</p>
             </div>
           ) : (
             <div className="space-y-3">
               {res.consolidado && (
-                <PlanilhaRow p={res.consolidado} destaque />
+                <PlanilhaRow p={res.consolidado} destaque onBaixar={baixar} baixando={baixando} />
               )}
-              {res.planilhas.map((p) => <PlanilhaRow key={p.url} p={p} />)}
+              {res.planilhas.map((p) => <PlanilhaRow key={p.url} p={p} onBaixar={baixar} baixando={baixando} />)}
             </div>
           )}
         </section>
@@ -286,7 +384,8 @@ function Index() {
 }
 
 function needsReview(r: Registro) {
-  return r.revisar || r.confianca == null || r.confianca < 0.7 ||
+  if (typeof r.revisar === "boolean") return r.revisar;
+  return r.confianca == null || r.confianca < 0.7 ||
     [r.entrada, r.saida_almoco, r.volta_almoco, r.saida].some((h) => !h);
 }
 
@@ -327,12 +426,26 @@ const CAMPOS: { k: keyof Registro; l: string }[] = [
   { k: "volta_almoco", l: "Volta almoço" }, { k: "saida", l: "Saída final" },
 ];
 
-function ReviewTable({ registros, onChange }: { registros: Registro[]; onChange: (r: Registro[]) => void }) {
+function ReviewTable({ registros, onCorrigir }: { registros: Registro[]; onCorrigir: (id: string, changes: Partial<Registro>) => Promise<void> }) {
   const [editing, setEditing] = useState<string | null>(null);
+  const [draft, setDraft] = useState<Registro | null>(null);
+  const [salvando, setSalvando] = useState(false);
   if (!registros.length)
     return <div className="rounded-lg bg-muted p-6 text-center text-sm text-muted-foreground">Os horários reconhecidos aparecerão aqui após o processamento real dos cartões.</div>;
-  const set = (id: string, k: keyof Registro, v: string) =>
-    onChange(registros.map((r) => (r.id === id ? { ...r, [k]: v || null } : r)));
+  const iniciar = (r: Registro) => { setEditing(r.id); setDraft({ ...r }); };
+  const cancelar = () => { setEditing(null); setDraft(null); };
+  const set = (k: keyof Registro, v: string) => setDraft((d) => (d ? { ...d, [k]: v || null } : d));
+  const concluir = async () => {
+    const orig = registros.find((r) => r.id === editing);
+    if (!orig || !draft) { cancelar(); return; }
+    const changes: Partial<Registro> = {};
+    for (const c of CAMPOS) if ((draft[c.k] as string | null) !== (orig[c.k] as string | null)) (changes as Record<string, string | null>)[c.k] = draft[c.k] as string | null;
+    if (Object.keys(changes).length) {
+      setSalvando(true);
+      try { await onCorrigir(orig.id, changes); } finally { setSalvando(false); }
+    }
+    cancelar();
+  };
   return (
     <div className="overflow-x-auto">
       <table className="w-full min-w-[900px] text-sm">
@@ -344,20 +457,30 @@ function ReviewTable({ registros, onChange }: { registros: Registro[]; onChange:
         <tbody>
           {registros.map((r) => {
             const rev = needsReview(r); const ed = editing === r.id;
+            const linha = ed && draft ? draft : r;
             return (
               <tr key={r.id} className={`border-b border-border ${rev ? "bg-warning" : ""}`}>
                 <td className="p-2">{r.funcionario ?? "—"}</td><td className="p-2">{r.data ?? "—"}</td><td className="p-2">{r.dia_semana ?? "—"}</td>
                 {CAMPOS.map((c) => (
                   <td key={c.k} className="p-2">
-                    {ed ? <input type="time" value={(r[c.k] as string) ?? ""} onChange={(e) => set(r.id, c.k, e.target.value)} className="rounded border border-input bg-card px-1 py-0.5" />
+                    {ed ? <input type="time" value={(linha[c.k] as string) ?? ""} disabled={salvando} onChange={(e) => set(c.k, e.target.value)} className="rounded border border-input bg-card px-1 py-0.5" />
                       : (r[c.k] as string) ?? <span className="font-medium text-destructive">Revisar</span>}
                   </td>
                 ))}
                 <td className="p-2">{r.confianca == null ? "—" : `${Math.round(r.confianca * 100)}%`}{rev && <span className="ml-1 text-xs text-warning-foreground">· revisão manual</span>}</td>
                 <td className="p-2">
-                  <button onClick={() => setEditing(ed ? null : r.id)} className="inline-flex items-center gap-1 rounded border border-primary px-2 py-1 text-xs text-primary hover:bg-accent">
-                    {ed ? <><Check className="h-3 w-3" />Concluir</> : <><Pencil className="h-3 w-3" />Corrigir</>}
-                  </button>
+                  {ed ? (
+                    <div className="flex items-center gap-2">
+                      <button onClick={concluir} disabled={salvando} className="inline-flex items-center gap-1 rounded border border-primary px-2 py-1 text-xs text-primary hover:bg-accent disabled:opacity-50">
+                        {salvando ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />}{salvando ? "Salvando" : "Concluir"}
+                      </button>
+                      <button onClick={cancelar} disabled={salvando} className="inline-flex items-center gap-1 rounded border border-border px-2 py-1 text-xs text-muted-foreground hover:bg-muted disabled:opacity-50">Cancelar</button>
+                    </div>
+                  ) : (
+                    <button onClick={() => iniciar(r)} className="inline-flex items-center gap-1 rounded border border-primary px-2 py-1 text-xs text-primary hover:bg-accent">
+                      <Pencil className="h-3 w-3" />Corrigir
+                    </button>
+                  )}
                 </td>
               </tr>
             );
@@ -368,17 +491,44 @@ function ReviewTable({ registros, onChange }: { registros: Registro[]; onChange:
   );
 }
 
-function PlanilhaRow({ p, destaque }: { p: { arquivo: string; funcionario: string | null; referencia: string | null; status: string; url: string }; destaque?: boolean }) {
+function PlanilhaRow({
+  p,
+  destaque,
+  onBaixar,
+  baixando,
+}: {
+  p: Planilha;
+  destaque?: boolean;
+  onBaixar: (url: string, nome: string) => void;
+  baixando: string | null;
+}) {
+  const carregando = baixando === p.url;
+  const subtitulo = [p.funcionario, p.referencia, p.status].filter(Boolean).join(" · ");
   return (
-    <div className={`flex flex-col gap-3 rounded-lg border p-4 sm:flex-row sm:items-center ${destaque ? "border-primary bg-accent" : "border-border"}`}>
+    <div
+      className={`flex flex-col gap-3 rounded-lg border p-4 sm:flex-row sm:items-center ${destaque ? "border-primary bg-accent" : "border-border"}`}
+    >
       <FileSpreadsheet className="h-8 w-8 shrink-0 text-success" />
       <div className="flex-1">
-        <p className="font-medium">{destaque ? "Planilha consolidada · " : ""}{p.arquivo}</p>
-        <p className="text-sm text-muted-foreground">{[p.funcionario, p.referencia, p.status].filter(Boolean).join(" · ")}</p>
+        <p className="font-medium">
+          {destaque ? "Planilha consolidada · " : ""}
+          {p.arquivo}
+        </p>
+        <p className="text-sm text-muted-foreground">{subtitulo}</p>
       </div>
-      <a href={resolveUrl(p.url)} download={p.arquivo} className="inline-flex items-center justify-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground hover:opacity-90">
-        <Download className="h-4 w-4" />Baixar Excel
-      </a>
+      <button
+        type="button"
+        onClick={() => onBaixar(p.url, p.arquivo)}
+        disabled={carregando}
+        className="inline-flex items-center justify-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground hover:opacity-90 disabled:opacity-60"
+      >
+        {carregando ? (
+          <Loader2 className="h-4 w-4 animate-spin" />
+        ) : (
+          <Download className="h-4 w-4" />
+        )}
+        {carregando ? "Baixando..." : "Baixar Excel"}
+      </button>
     </div>
   );
 }

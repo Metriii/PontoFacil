@@ -21,6 +21,7 @@ from ..persistence import (
 from ..security import ArquivoRecebido
 from ..storage import salvar_imagem
 from .execucao import ExecutorLotes
+from .exportacao import ResultadoExportacao, ServicoExportacao
 from .processamento import Extrator, processar_imagem, processar_lote
 
 
@@ -70,6 +71,7 @@ class ServicoLotes:
         self.repo = repo
         self.executor = executor
         self.extrator = extrator
+        self.exportacao = ServicoExportacao(repo)
 
     def criar_lote(self, arquivos: list[ArquivoRecebido]) -> Lote:
         """Cria o lote, grava as imagens validadas e marca-o como ``processando``."""
@@ -137,3 +139,11 @@ class ServicoLotes:
                     registro.status_validacao = "corrigido"
         self.repo.salvar_fichas(lote_id, fichas)
         self.repo.salvar_duvidas(lote_id, duvidas)
+
+    def exportar_lote(self, lote_id: str) -> ResultadoExportacao:
+        """Gera as planilhas do lote (etapa 10)."""
+        return self.exportacao.exportar(lote_id)
+
+    def localizar_arquivo(self, lote_id: str, arquivo_id: str):
+        """Resolve o caminho de download de um arquivo gerado pertencente ao lote."""
+        return self.exportacao.localizar(lote_id, arquivo_id)
